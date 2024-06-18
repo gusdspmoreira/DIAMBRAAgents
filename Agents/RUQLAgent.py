@@ -1,12 +1,38 @@
 #!/usr/bin/env python3
 import os
 import pickle
-import datetime
 from os.path import expanduser
 import diambra.arena
 import numpy as np
 from diambra.arena import SpaceTypes, EnvironmentSettingsMultiAgent, EnvironmentSettings, WrappersSettings, RecordingSettings, Roles
 from collections import defaultdict
+
+class RUQLAgent:
+    """
+    RUQL agent based on this paper: https://jmlr.org/papers/v17/14-037.html#:~:text=Here%2C%20we%20introduce%20Repeated%20Update,%2Dthe%2Dart%20algorithms%20theoretically
+    """
+    def __init__(self, Q, num_actions, epsilon, alpha, discount_factor):
+        if len(Q.keys()) != 0:
+            new_Q = defaultdict(lambda: np.zeros(num_actions))
+            for key in Q.keys():
+                new_Q[key] = Q[key]
+            self.Q = new_Q
+        else:
+            self.Q = defaultdict(lambda: np.zeros(num_actions))
+        self.num_actions = num_actions
+        self.epsilon = epsilon
+        self.alpha = alpha
+        self.discount_factor = discount_factor
+    def update(self, episode_num, reward, action_probs, action, obs, next_obs):
+        if episode_num % 1000 == 0:
+            self.epsilon /= 2
+        left_term = (1-self.alpha)**(1/action_probs[action])*self.Q[obs][action]
+        right_term = 1 - (1-self.alpha)**(1/action_probs[action])
+        best_next_action = np.argmin(self.Q[next_obs])
+        td_target = reward + self.discount_factor * self.Q[next_obs][best_next_action]
+        right_term *= td_target
+        self.Q[obs][action] = left_term + right_term
+    
 
 def create_epsilon_greedy_policy(Q, epsilon, num_actions):
     """
@@ -68,7 +94,7 @@ def main():
     # - [0.0, 1.0]: probability of continuing game at game over
     # - int((-inf, -1.0]): number of continues at game over
     #                      before episode to be considered done
-    settings.continue_game = 0.99
+    settings.continue_game = 0.0
 
     # If to show game final when game is completed
     settings.show_final = False
@@ -96,58 +122,34 @@ def main():
     alpha = 0.01
     discount_factor = 0.9
 
-    num_identical_rewards = 0
-
     try:
         with open(game_file_path, 'rb+') as fp:
             Q = pickle.load(fp)
     except:
         Q = defaultdict(lambda: np.zeros(num_actions))
-    if len(Q.keys()) != 0:
-        new_Q = defaultdict(lambda: np.zeros(num_actions))
-        for key in Q.keys():
-            new_Q[key] = Q[key]
-        Q = new_Q
 
-    prev_reward = 0
+    agent = RUQLAgent(Q, num_actions, epsilon, alpha, discount_factor)
+
     episode_num = 0
     # Agent-Environment interaction loop
     while True:
         # Environment rendering
         env.render()
 
-        # Decrease epsilon over time
-        if episode_num % 1000 == 0:
-            epsilon /= 2
         # Use epsilon greedy policy to get action
-        policy = create_epsilon_greedy_policy(Q, epsilon, num_actions)
+        policy = create_epsilon_greedy_policy(agent.Q, epsilon, num_actions)
         action_probs = policy(obs)
         action = np.random.choice(np.arange(len(action_probs)), p = action_probs)
 
         # Environment stepping
         next_obs, reward, terminated, truncated, info = env.step(action)
-        if prev_reward != 0 and prev_reward == reward:
-            num_identical_rewards += 1
-        elif prev_reward != 0 and prev_reward != reward:
-            num_identical_rewards = 0
-        
-        if num_identical_rewards > 5:
-            reward *= -1000
-        reward *= next_obs['timer']/100
-
 
         # Negate reward to use argmin
         reward = -1*reward
         done = terminated or truncated
         next_obs = convert_obs(next_obs)
 
-        # RUQL https://jmlr.org/papers/v17/14-037.html#:~:text=Here%2C%20we%20introduce%20Repeated%20Update,%2Dthe%2Dart%20algorithms%20theoretically.
-        left_term = (1-alpha)**(1/action_probs[action])*Q[obs][action]
-        right_term = 1 - (1-alpha)**(1/action_probs[action])
-        best_next_action = np.argmin(Q[next_obs])
-        td_target = reward + discount_factor * Q[next_obs][best_next_action]
-        right_term *= td_target
-        Q[obs][action] = left_term + right_term
+        agent.update(episode_num, reward, action_probs, action, obs, next_obs)
 
         # Episode end (Done condition) check
         if done:
@@ -158,10 +160,6 @@ def main():
         episode_num += 1
     # Environment shutdown
     env.close()
-
-    print("Q VALUES:")
-    for key in Q.keys():
-        print(f'KEY: {key}         VALUE: {Q[key]}')
 
     if not os.path.exists('./PickledQTables/'):
         os.makedirs('./PickledQTables/')
